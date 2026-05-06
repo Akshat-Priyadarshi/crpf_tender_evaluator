@@ -1,0 +1,59 @@
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: crpf_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-crpf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crpf_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-crpf_ingestion}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crpf} -d ${POSTGRES_DB:-crpf_ingestion}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  clamav:
+    image: clamav/clamav:stable
+    container_name: crpf_clamav
+    restart: unless-stopped
+    expose:
+      - "3310"
+    environment:
+      - CLAMAV_NO_FRESHCLAMD=false
+    volumes:
+      - clamav_db:/var/lib/clamav
+
+  fastapi:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: crpf_fastapi
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clamav:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-crpf}:${POSTGRES_PASSWORD:-crpf_secret}@postgres:5432/${POSTGRES_DB:-crpf_ingestion}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      VAULT_PATH: /evidence_vault
+      SECRET_KEY: ${SECRET_KEY:-change_this}
+    volumes:
+      - ./backend:/app
+      - evidence_vault:/evidence_vault
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
+  clamav_db:
+  evidence_vault:

@@ -1,0 +1,38 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --navy:       #0B1120;
+  --navy-mid:   #131E30;
+  --navy-card:  #1A2740;
+  --navy-border:#243450;
+  --slate:      #2E4060;
+  --amber:      #F59E0B;
+  --amber-dim:  #92400E;
+  --green:      #10B981;
+  --green-dim:  #064E3B;
+  --red:        #EF4444;
+  --red-dim:    #7F1D1D;
+  --blue:       #3B82F6;
+  --text-primary:   #E2E8F0;
+  --text-secondary: #94A3B8;
+  --text-muted:     #475569;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background-color: var(--navy);
+  color: var(--text-primary);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.mono { font-family: 'IBM Plex Mono', monospace; }
+.badge-pass   { background: var(--green-dim); color: var(--green); border: 1px solid var(--green); }
+.badge-fail   { background: var(--red-dim);   color: var(--red);   border: 1px solid var(--red); }
+.badge-review { background: var(--amber-dim); color: var(--amber); border: 1px solid var(--amber); }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--navy-mid); }
+::-webkit-scrollbar-thumb { background: var(--slate); border-radius: 2px; }
