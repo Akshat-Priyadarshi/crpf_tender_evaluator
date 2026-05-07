@@ -1,456 +1,674 @@
 "use client";
-import { useState, useRef, DragEvent } from "react";
+
+import { useState, useRef, DragEvent, ChangeEvent } from "react";
 import axios from "axios";
 
-type IngestionResult = {
-  status: string;
-  document_hash: string;
-  filename: string;
-  vault_path: string;
-  file_size_bytes: number;
-  virus_scan: string;
-  classification: {
-    doc_type: string;
-    classification_status: string;
-    confidence_tier: number;
-    reason: string;
-    bidder_id: string | null;
-    tender_id: string | null;
-  };
-};
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type StepStatus = "idle" | "running" | "done" | "error";
+type UploadMode = "single" | "evaluate";
 
-interface Step {
-  id: string;
+interface PipelineStep {
   label: string;
-  status: StepStatus;
-  detail?: string;
+  status: "waiting" | "running" | "done" | "error";
 }
 
-const FASTAPI_URL = "http://localhost:8000";
+const SINGLE_STEPS: PipelineStep[] = [
+  { label: "Receive", status: "waiting" },
+  { label: "Scan", status: "waiting" },
+  { label: "Hash", status: "waiting" },
+  { label: "Classify", status: "waiting" },
+  { label: "Vault", status: "waiting" },
+  { label: "Audit", status: "waiting" },
+];
 
-function VerdictBadge({ value }: { value: string }) {
-  const v = value.toUpperCase();
-  const cls = v === "PASS" || v === "CLEAN" || v === "INGESTED"
-    ? "badge-pass"
-    : v === "DUPLICATE" ? "badge-review" : "badge-fail";
-  return (
-    <span className={cls} style={{
-      padding: "2px 10px", borderRadius: 4,
-      fontSize: 11, fontWeight: 600, fontFamily: "'IBM Plex Mono',monospace",
-      letterSpacing: "0.05em",
-    }}>{v}</span>
-  );
-}
+const EVAL_STEPS: PipelineStep[] = [
+  { label: "Receive", status: "waiting" },
+  { label: "Scan ×2", status: "waiting" },
+  { label: "Hash ×2", status: "waiting" },
+  { label: "Classify", status: "waiting" },
+  { label: "Vault ×2", status: "waiting" },
+  { label: "Extract", status: "waiting" },
+  { label: "Job", status: "waiting" },
+];
 
-function StepRow({ step }: { step: Step }) {
-  const icon = step.status === "running" ? "⟳"
-    : step.status === "done" ? "✓"
-    : step.status === "error" ? "✗" : "○";
-  const color = step.status === "running" ? "var(--amber)"
-    : step.status === "done" ? "var(--green)"
-    : step.status === "error" ? "var(--red)" : "var(--text-muted)";
+export default function UploadPage() {
+  const [mode, setMode] = useState<UploadMode>("evaluate");
+
+  // Single-file mode
+  const [singleFile, setSingleFile] = useState<File | null>(null);
+  const [singleDrag, setSingleDrag] = useState(false);
+  const singleRef = useRef<HTMLInputElement>(null);
+
+  // Two-file mode
+  const [tenderFile, setTenderFile] = useState<File | null>(null);
+  const [bidderFile, setBidderFile] = useState<File | null>(null);
+  const [tenderDrag, setTenderDrag] = useState(false);
+  const [bidderDrag, setBidderDrag] = useState(false);
+  const tenderRef = useRef<HTMLInputElement>(null);
+  const bidderRef = useRef<HTMLInputElement>(null);
+
+  // Shared form fields
+  const [tenderId, setTenderId] = useState("");
+  const [bidderId, setBidderId] = useState("");
+  const [actorRole, setActorRole] = useState("officer");
+  const [thresholdValue, setThresholdValue] = useState("");
+  const [thresholdUnit, setThresholdUnit] = useState("INR");
+
+  // Pipeline state
+  const [steps, setSteps] = useState<PipelineStep[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function advanceSteps(
+    stepsCopy: PipelineStep[],
+    upTo: number,
+  ): PipelineStep[] {
+    return stepsCopy.map((s, i) => ({
+      ...s,
+      status: i < upTo ? "done" : i === upTo ? "running" : "waiting",
+    }));
+  }
+
+  function animateSteps(initialSteps: PipelineStep[]): Promise<PipelineStep[]> {
+    return new Promise((resolve) => {
+      // Explicitly type 'current' so TS knows the status will change later
+      let current: PipelineStep[] = initialSteps.map((s) => ({
+        ...s,
+        status: "waiting", // You can also remove 'as const' now
+      }));
+
+      setSteps(current);
+
+      let i = 0;
+      const interval = setInterval(() => {
+        current = advanceSteps([...current], i);
+        setSteps([...current]);
+        i++;
+        if (i >= current.length) {
+          clearInterval(interval);
+          const done: PipelineStep[] = current.map((s) => ({
+            ...s,
+            status: "done",
+          }));
+          setSteps(done);
+          resolve(done);
+        }
+      }, 500);
+    });
+  }
+
+  function reset() {
+    setSingleFile(null);
+    setTenderFile(null);
+    setBidderFile(null);
+    setResult(null);
+    setError(null);
+    setSteps([]);
+  }
+
+  // ── Single file submit ────────────────────────────────────────────────────
+
+  async function submitSingle() {
+    if (!singleFile) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    const animation = animateSteps([...SINGLE_STEPS]);
+
+    const fd = new FormData();
+    fd.append("file", singleFile);
+    fd.append("tender_id", tenderId);
+    fd.append("bidder_id", bidderId);
+    fd.append("actor_role", actorRole);
+
+    try {
+      await animation;
+      const res = await axios.post(`${API}/api/v1/ingest`, fd);
+      setResult(res.data);
+    } catch (err: any) {
+      setError(
+        err.response?.data?.detail
+          ? JSON.stringify(err.response.data.detail)
+          : err.message,
+      );
+      setSteps((prev) =>
+        prev.map((s, i) =>
+          s.status === "running" ? { ...s, status: "error" } : s,
+        ),
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── Two-file evaluate submit ──────────────────────────────────────────────
+
+  async function submitEvaluate() {
+    if (!tenderFile || !bidderFile || !thresholdValue) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    const animation = animateSteps([...EVAL_STEPS]);
+
+    const fd = new FormData();
+    fd.append("tender_file", tenderFile);
+    fd.append("bidder_file", bidderFile);
+    fd.append("threshold_value", thresholdValue);
+    fd.append("threshold_unit", thresholdUnit);
+    fd.append("tender_id", tenderId);
+    fd.append("bidder_id", bidderId);
+    fd.append("actor_role", actorRole);
+
+    try {
+      await animation;
+      const res = await axios.post(`${API}/api/v1/ingest/evaluate`, fd);
+      setResult(res.data);
+    } catch (err: any) {
+      setError(
+        err.response?.data?.detail
+          ? JSON.stringify(err.response.data.detail)
+          : err.message,
+      );
+      setSteps((prev) =>
+        prev.map((s) =>
+          s.status === "running" ? { ...s, status: "error" } : s,
+        ),
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── Drop handlers ─────────────────────────────────────────────────────────
+
+  function onDrop(
+    e: DragEvent,
+    setter: (f: File) => void,
+    setDrag: (b: boolean) => void,
+  ) {
+    e.preventDefault();
+    setDrag(false);
+    const f = e.dataTransfer.files[0];
+    if (f) setter(f);
+  }
+
+  // ── Derived ───────────────────────────────────────────────────────────────
+
+  const singleReady = !!singleFile;
+  const evalReady = !!tenderFile && !!bidderFile && !!thresholdValue.trim();
+  const isReady = mode === "single" ? singleReady : evalReady;
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "8px 0",
-      borderBottom: "1px solid var(--navy-border)" }}>
-      <span style={{ color, fontSize: 14, fontFamily: "'IBM Plex Mono',monospace",
-        animation: step.status === "running" ? "spin 1s linear infinite" : "none",
-        minWidth: 16, textAlign: "center" }}>{icon}</span>
-      <div>
-        <div style={{ fontSize: 13, color: color, fontWeight: 500 }}>{step.label}</div>
-        {step.detail && (
-          <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>
-            {step.detail}
+    <div className="page">
+      <div className="layer-badge">LAYER 1 — SECURE INGESTION</div>
+      <h1 className="page-title">Ingest Documents</h1>
+      <p className="page-sub">
+        Every document is virus-scanned, SHA-256 fingerprinted, classified, and
+        sealed in the evidence vault before any processing begins.
+      </p>
+
+      {/* Mode toggle */}
+      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1.5rem" }}>
+        <button
+          onClick={() => {
+            reset();
+            setMode("single");
+          }}
+          style={{
+            padding: "0.4rem 1.2rem",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontSize: "13px",
+            fontWeight: 600,
+            border: "1px solid",
+            background: mode === "single" ? "var(--accent)" : "transparent",
+            color: mode === "single" ? "#000" : "var(--text-muted)",
+            borderColor: mode === "single" ? "var(--accent)" : "var(--border)",
+          }}
+        >
+          Single File
+        </button>
+        <button
+          onClick={() => {
+            reset();
+            setMode("evaluate");
+          }}
+          style={{
+            padding: "0.4rem 1.2rem",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontSize: "13px",
+            fontWeight: 600,
+            border: "1px solid",
+            background: mode === "evaluate" ? "var(--accent)" : "transparent",
+            color: mode === "evaluate" ? "#000" : "var(--text-muted)",
+            borderColor:
+              mode === "evaluate" ? "var(--accent)" : "var(--border)",
+          }}
+        >
+          Tender + Bidder (Evaluate)
+        </button>
+      </div>
+
+      {/* ── SINGLE FILE MODE ── */}
+      {mode === "single" && (
+        <div className="upload-grid">
+          <div
+            className={`dropzone ${singleDrag ? "drag" : ""}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setSingleDrag(true);
+            }}
+            onDragLeave={() => setSingleDrag(false)}
+            onDrop={(e) => onDrop(e, setSingleFile, setSingleDrag)}
+            onClick={() => singleRef.current?.click()}
+          >
+            <input
+              ref={singleRef}
+              type="file"
+              style={{ display: "none" }}
+              accept=".pdf,.docx,.doc,.jpg,.jpeg,.png,.tiff,.tif"
+              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                if (e.target.files?.[0]) setSingleFile(e.target.files[0]);
+              }}
+            />
+            <div className="dropzone-icon">↑</div>
+            {singleFile ? (
+              <div
+                className="dropzone-label"
+                style={{ color: "var(--accent)" }}
+              >
+                {singleFile.name}
+              </div>
+            ) : (
+              <div className="dropzone-label">
+                Drop document here or click to browse
+              </div>
+            )}
+            <div className="dropzone-hint">
+              PDF, JPG, PNG, TIFF, XLSX, DOCX · Max 50MB
+            </div>
+          </div>
+          <PipelineStatusBox steps={steps} />
+        </div>
+      )}
+
+      {/* ── TWO FILE MODE ── */}
+      {mode === "evaluate" && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr 1fr",
+            gap: "1rem",
+            marginBottom: "1.5rem",
+          }}
+        >
+          {/* Tender drop */}
+          <div>
+            <div className="form-label" style={{ marginBottom: "0.5rem" }}>
+              📄 Tender Document (CRPF)
+            </div>
+            <div
+              className={`dropzone ${tenderDrag ? "drag" : ""}`}
+              style={{ padding: "2rem 1rem" }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setTenderDrag(true);
+              }}
+              onDragLeave={() => setTenderDrag(false)}
+              onDrop={(e) => onDrop(e, setTenderFile, setTenderDrag)}
+              onClick={() => tenderRef.current?.click()}
+            >
+              <input
+                ref={tenderRef}
+                type="file"
+                style={{ display: "none" }}
+                accept=".pdf,.docx,.doc,.jpg,.jpeg,.png,.tiff"
+                onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                  if (e.target.files?.[0]) setTenderFile(e.target.files[0]);
+                }}
+              />
+              <div className="dropzone-icon">📋</div>
+              {tenderFile ? (
+                <div
+                  className="dropzone-label"
+                  style={{ color: "var(--accent)", fontSize: "12px" }}
+                >
+                  {tenderFile.name}
+                </div>
+              ) : (
+                <div className="dropzone-label">Drop tender doc or click</div>
+              )}
+              <div className="dropzone-hint">PDF / DOCX / Image</div>
+            </div>
+          </div>
+
+          {/* Bidder drop */}
+          <div>
+            <div className="form-label" style={{ marginBottom: "0.5rem" }}>
+              📁 Bidder Submission
+            </div>
+            <div
+              className={`dropzone ${bidderDrag ? "drag" : ""}`}
+              style={{ padding: "2rem 1rem" }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setBidderDrag(true);
+              }}
+              onDragLeave={() => setBidderDrag(false)}
+              onDrop={(e) => onDrop(e, setBidderFile, setBidderDrag)}
+              onClick={() => bidderRef.current?.click()}
+            >
+              <input
+                ref={bidderRef}
+                type="file"
+                style={{ display: "none" }}
+                accept=".pdf,.docx,.doc,.jpg,.jpeg,.png,.tiff"
+                onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                  if (e.target.files?.[0]) setBidderFile(e.target.files[0]);
+                }}
+              />
+              <div className="dropzone-icon">🏗️</div>
+              {bidderFile ? (
+                <div
+                  className="dropzone-label"
+                  style={{ color: "var(--accent)", fontSize: "12px" }}
+                >
+                  {bidderFile.name}
+                </div>
+              ) : (
+                <div className="dropzone-label">Drop bidder doc or click</div>
+              )}
+              <div className="dropzone-hint">PDF / DOCX / Image</div>
+            </div>
+          </div>
+
+          {/* Pipeline status */}
+          <div>
+            <div className="form-label" style={{ marginBottom: "0.5rem" }}>
+              Pipeline Status
+            </div>
+            <PipelineStatusBox steps={steps} />
+          </div>
+        </div>
+      )}
+
+      {/* ── Shared form fields ── */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns:
+            mode === "evaluate" ? "1fr 1fr 1fr 1fr" : "1fr 1fr 1fr",
+          gap: "1rem",
+          marginBottom: "1rem",
+        }}
+      >
+        <div className="form-group">
+          <label className="form-label">Tender ID</label>
+          <input
+            className="form-input"
+            placeholder="e.g. TENDER_CRPF_2026_034"
+            value={tenderId}
+            onChange={(e) => setTenderId(e.target.value)}
+          />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Bidder ID</label>
+          <input
+            className="form-input"
+            placeholder="e.g. B-01 or leave blank"
+            value={bidderId}
+            onChange={(e) => setBidderId(e.target.value)}
+          />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Actor Role</label>
+          <select
+            className="form-select"
+            value={actorRole}
+            onChange={(e) => setActorRole(e.target.value)}
+          >
+            <option value="officer">officer</option>
+            <option value="evaluator">evaluator</option>
+            <option value="admin">admin</option>
+          </select>
+        </div>
+
+        {mode === "evaluate" && (
+          <div className="form-group">
+            <label className="form-label">
+              Threshold Value
+              <select
+                value={thresholdUnit}
+                onChange={(e) => setThresholdUnit(e.target.value)}
+                style={{
+                  marginLeft: "0.5rem",
+                  fontSize: "11px",
+                  background: "var(--bg-card)",
+                  color: "var(--text-muted)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "4px",
+                  padding: "0.1rem 0.3rem",
+                }}
+              >
+                <option value="INR">INR</option>
+                <option value="percent">%</option>
+                <option value="count">count</option>
+                <option value="score">score</option>
+              </select>
+            </label>
+            <input
+              className="form-input"
+              placeholder="e.g. 50000000"
+              type="number"
+              min="0"
+              value={thresholdValue}
+              onChange={(e) => setThresholdValue(e.target.value)}
+              style={{ fontFamily: "var(--font-mono, monospace)" }}
+            />
           </div>
         )}
       </div>
+
+      {/* Submit button */}
+      <button
+        className={`btn-primary ${isReady && !loading ? "ready" : ""}`}
+        disabled={!isReady || loading}
+        onClick={mode === "single" ? submitSingle : submitEvaluate}
+      >
+        {loading
+          ? "PROCESSING..."
+          : mode === "single"
+            ? "INGEST DOCUMENT →"
+            : "INGEST & EVALUATE →"}
+      </button>
+
+      <div className="footer-hint">
+        {mode === "single"
+          ? "ClamAV scan · SHA-256 hash · RBAC vault · Hash-chained audit ledger"
+          : "ClamAV scan · SHA-256 hash · Text extraction (PDF/DOCX/OCR) · EvaluationJob created"}
+      </div>
+
+      {/* Result display */}
+      {result && <ResultBox result={result} mode={mode} />}
+      {error && (
+        <div className="result-box error" style={{ marginTop: "1.5rem" }}>
+          <div className="result-title">Error</div>
+          <pre
+            style={{
+              fontSize: "11px",
+              color: "var(--red)",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}
+          >
+            {error}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
 
-export default function UploadPage() {
-  const [dragging, setDragging] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [tenderId, setTenderId] = useState("");
-  const [bidderId, setBidderId] = useState("");
-  const [actorRole, setActorRole] = useState("officer");
-  const [steps, setSteps] = useState<Step[]>([]);
-  const [result, setResult] = useState<IngestionResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+// ── Sub-components ────────────────────────────────────────────────────────────
 
-  const updateStep = (id: string, status: StepStatus, detail?: string) => {
-    setSteps(prev => prev.map(s => s.id === id ? { ...s, status, detail } : s));
-  };
-
-  const handleFile = (f: File) => {
-    setFile(f);
-    setResult(null);
-    setError(null);
-    setSteps([]);
-  };
-
-  const onDrop = (e: DragEvent) => {
-    e.preventDefault();
-    setDragging(false);
-    const f = e.dataTransfer.files[0];
-    if (f) handleFile(f);
-  };
-
-  const onSubmit = async () => {
-    if (!file) return;
-    setLoading(true);
-    setResult(null);
-    setError(null);
-
-    const initialSteps: Step[] = [
-      { id: "receive",  label: "File received & size validated",  status: "idle" },
-      { id: "scan",     label: "ClamAV virus scan",               status: "idle" },
-      { id: "hash",     label: "SHA-256 fingerprint computed",    status: "idle" },
-      { id: "dedup",    label: "Deduplication check",             status: "idle" },
-      { id: "classify", label: "Three-tier classification",       status: "idle" },
-      { id: "vault",    label: "Sealed to evidence vault",        status: "idle" },
-      { id: "audit",    label: "Audit ledger entry written",      status: "idle" },
-    ];
-    setSteps(initialSteps);
-
-    // Animate steps sequentially (real call happens, steps are simulated for UX)
-    const animate = async () => {
-      updateStep("receive", "running");
-      await delay(300);
-      updateStep("receive", "done", `${(file.size / 1024).toFixed(1)} KB · ${file.type || "application/octet-stream"}`);
-      updateStep("scan", "running");
-    };
-    animate();
-
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      if (tenderId) form.append("tender_id", tenderId);
-      if (bidderId) form.append("bidder_id", bidderId);
-      form.append("actor_role", actorRole);
-
-      // Real API call
-      const res = await axios.post(`${FASTAPI_URL}/api/v1/ingest`, form, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-
-      const data: IngestionResult = res.data;
-
-      // Complete the remaining step animations
-      updateStep("scan", "done", "ClamAV — CLEAN");
-      await delay(200);
-      updateStep("hash", "running");
-      await delay(300);
-      updateStep("hash", "done", `SHA-256: ${data.document_hash.substring(0, 24)}...`);
-      updateStep("dedup", "running");
-      await delay(200);
-
-      if (data.status === "DUPLICATE") {
-        updateStep("dedup", "done", "Duplicate detected — already ingested");
-        setSteps(prev => prev.map((s, i) => i > 3 ? { ...s, status: "idle" } : s));
-        setResult(data);
-        setLoading(false);
-        return;
-      }
-
-      updateStep("dedup", "done", "New document — proceeding");
-      updateStep("classify", "running");
-      await delay(300);
-      updateStep("classify", "done",
-        `Tier ${data.classification.confidence_tier} → ${data.classification.doc_type.toUpperCase()} · ${data.classification.classification_status}`
-      );
-      updateStep("vault", "running");
-      await delay(200);
-      updateStep("vault", "done", data.vault_path);
-      updateStep("audit", "running");
-      await delay(200);
-      updateStep("audit", "done", "Hash-chained ledger entry written");
-
-      setResult(data);
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { detail?: string | { error?: string; message?: string; threat?: string } }; status?: number } };
-      const detail = axiosErr.response?.data?.detail;
-      let msg = "Ingestion failed.";
-      if (typeof detail === "string") msg = detail;
-      else if (detail && typeof detail === "object") {
-        msg = detail.message || detail.error || msg;
-        if (detail.threat) msg += ` Threat: ${detail.threat}`;
-      }
-
-      const status = axiosErr.response?.status;
-      if (status === 406) {
-        updateStep("scan", "error", msg);
-        setSteps(prev => prev.map((s, i) => i > 1 ? { ...s, status: "error" as StepStatus } : s));
-      } else {
-        setSteps(prev => prev.map(s =>
-          s.status === "running" ? { ...s, status: "error" as StepStatus } : s
-        ));
-      }
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-  const tierLabel = (t: number) =>
-    t === 1 ? "Tier 1 — Portal regex match (confirmed)"
-    : t === 2 ? "Tier 2 — Keyword heuristic (pending OCR)"
-    : "Tier 3 — Unclassifiable (pending Layer 2 OCR)";
+function PipelineStatusBox({ steps }: { steps: PipelineStep[] }) {
+  if (steps.length === 0) {
+    return (
+      <div
+        className="pipeline-status"
+        style={{ height: "100%", minHeight: "140px" }}
+      >
+        <span style={{ fontSize: "1.5rem" }}>🔒</span>
+        <span>Pipeline status will appear here after you submit.</span>
+        <span className="steps">
+          Virus Scan → Hash → Dedup → Classify → Vault → Audit
+        </span>
+      </div>
+    );
+  }
 
   return (
-    <div style={{ padding: "32px 40px", maxWidth: 1100, margin: "0 auto" }}>
-      {/* Header */}
-      <div style={{ marginBottom: 28 }}>
-        <div style={{ fontSize: 11, fontFamily: "'IBM Plex Mono',monospace", color: "var(--amber)", marginBottom: 6, letterSpacing: "0.1em" }}>
-          LAYER 1 — SECURE INGESTION
-        </div>
-        <h1 style={{ fontSize: 24, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>
-          Ingest Documents
-        </h1>
-        <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-          Every document is virus-scanned, SHA-256 fingerprinted, classified, and sealed in the evidence vault before any processing begins.
-        </p>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-
-        {/* Left — Upload form */}
-        <div>
-          {/* Dropzone */}
-          <div
-            onClick={() => inputRef.current?.click()}
-            onDragOver={e => { e.preventDefault(); setDragging(true); }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
+    <div
+      className="pipeline-status"
+      style={{
+        height: "100%",
+        minHeight: "140px",
+        gap: "0.4rem",
+        justifyContent: "flex-start",
+        padding: "1rem",
+      }}
+    >
+      {steps.map((s, i) => (
+        <div
+          key={i}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            fontSize: "12px",
+          }}
+        >
+          <span>
+            {s.status === "done"
+              ? "✅"
+              : s.status === "running"
+                ? "⏳"
+                : s.status === "error"
+                  ? "❌"
+                  : "⬜"}
+          </span>
+          <span
             style={{
-              border: `2px dashed ${dragging ? "var(--amber)" : file ? "var(--green)" : "var(--navy-border)"}`,
-              borderRadius: 8,
-              padding: "40px 24px",
-              textAlign: "center",
-              cursor: "pointer",
-              background: dragging ? "rgba(245,158,11,0.05)" : "var(--navy-card)",
-              transition: "all 0.15s",
-              marginBottom: 20,
+              color:
+                s.status === "done"
+                  ? "var(--green)"
+                  : s.status === "running"
+                    ? "var(--accent)"
+                    : s.status === "error"
+                      ? "var(--red)"
+                      : "var(--text-sub)",
             }}
           >
-            <input ref={inputRef} type="file" hidden
-              accept=".pdf,.jpg,.jpeg,.png,.tiff,.xlsx,.xls,.docx"
-              onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])} />
-            <div style={{ fontSize: 32, marginBottom: 12 }}>
-              {file ? "📄" : "⬆"}
-            </div>
-            {file ? (
-              <>
-                <div style={{ fontWeight: 600, color: "var(--green)", fontSize: 14 }}>{file.name}</div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
-                  {(file.size / 1024).toFixed(1)} KB · Click to change
-                </div>
-              </>
-            ) : (
-              <>
-                <div style={{ fontWeight: 500, color: "var(--text-secondary)", fontSize: 14 }}>
-                  Drop document here or click to browse
-                </div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 6 }}>
-                  PDF, JPG, PNG, TIFF, XLSX, DOCX · Max 50MB
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Metadata fields */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
-            {[
-              { label: "Tender ID", val: tenderId, set: setTenderId, ph: "e.g. TENDER_CRPF_2026_034" },
-              { label: "Bidder ID", val: bidderId, set: setBidderId, ph: "e.g. B-01 or leave blank for tenders" },
-            ].map(f => (
-              <div key={f.label}>
-                <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
-                  {f.label}
-                </label>
-                <input
-                  value={f.val}
-                  onChange={e => f.set(e.target.value)}
-                  placeholder={f.ph}
-                  style={{
-                    width: "100%", padding: "8px 12px",
-                    background: "var(--navy-card)", border: "1px solid var(--navy-border)",
-                    borderRadius: 4, color: "var(--text-primary)", fontSize: 13,
-                    fontFamily: "'IBM Plex Mono',monospace", outline: "none",
-                  }}
-                />
-              </div>
-            ))}
-
-            <div>
-              <label style={{ fontSize: 12, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
-                Actor Role
-              </label>
-              <select
-                value={actorRole}
-                onChange={e => setActorRole(e.target.value)}
-                style={{
-                  width: "100%", padding: "8px 12px",
-                  background: "var(--navy-card)", border: "1px solid var(--navy-border)",
-                  borderRadius: 4, color: "var(--text-primary)", fontSize: 13,
-                  fontFamily: "'IBM Plex Mono',monospace", outline: "none",
-                }}
-              >
-                <option value="officer">officer</option>
-                <option value="evaluator">evaluator</option>
-                <option value="admin">admin</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Submit */}
-          <button
-            onClick={onSubmit}
-            disabled={!file || loading}
-            style={{
-              width: "100%", padding: "12px 24px",
-              background: !file || loading ? "var(--slate)" : "var(--amber)",
-              color: !file || loading ? "var(--text-muted)" : "var(--navy)",
-              border: "none", borderRadius: 6,
-              fontWeight: 700, fontSize: 14, cursor: !file || loading ? "not-allowed" : "pointer",
-              fontFamily: "'IBM Plex Sans',sans-serif",
-              transition: "all 0.15s",
-            }}
-          >
-            {loading ? "Processing..." : "INGEST DOCUMENT →"}
-          </button>
-
-          {/* Security note */}
-          <div style={{ marginTop: 12, fontSize: 11, color: "var(--text-muted)", textAlign: "center" }}>
-            ClamAV scan · SHA-256 hash · RBAC vault · Hash-chained audit ledger
-          </div>
+            {s.label}
+          </span>
         </div>
+      ))}
+    </div>
+  );
+}
 
-        {/* Right — Pipeline status + result */}
-        <div>
-          {/* Pipeline steps */}
-          {steps.length > 0 && (
-            <div style={{
-              background: "var(--navy-card)", border: "1px solid var(--navy-border)",
-              borderRadius: 8, padding: "16px 20px", marginBottom: 20,
-            }}>
-              <div style={{ fontSize: 11, color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace",
-                marginBottom: 12, letterSpacing: "0.1em" }}>INGESTION PIPELINE</div>
-              {steps.map(s => <StepRow key={s.id} step={s} />)}
-            </div>
-          )}
+function ResultBox({ result, mode }: { result: any; mode: UploadMode }) {
+  const isDupe = result.status === "DUPLICATE";
+  const boxClass = isDupe ? "duplicate" : "success";
 
-          {/* Error */}
-          {error && (
-            <div style={{
-              background: "var(--red-dim)", border: "1px solid var(--red)",
-              borderRadius: 8, padding: "16px 20px", marginBottom: 20,
-            }}>
-              <div style={{ fontWeight: 600, color: "var(--red)", marginBottom: 4 }}>Ingestion Rejected</div>
-              <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>{error}</div>
-            </div>
-          )}
-
-          {/* Success result */}
-          {result && result.status !== "DUPLICATE" && (
-            <div style={{
-              background: "var(--navy-card)", border: "1px solid var(--green)",
-              borderRadius: 8, padding: "20px",
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                <div style={{ fontSize: 11, color: "var(--green)", fontFamily: "'IBM Plex Mono',monospace", letterSpacing: "0.1em" }}>
-                  INGESTION REPORT
-                </div>
-                <VerdictBadge value={result.status} />
+  if (mode === "evaluate") {
+    return (
+      <div className={`result-box ${boxClass}`} style={{ marginTop: "1.5rem" }}>
+        <div className="result-title">
+          {isDupe ? "⚠ Duplicate Detected" : "✅ Evaluation Job Created"}
+        </div>
+        {[
+          ["Job ID", result.job_id],
+          ["Status", result.status],
+          ["Tender File", result.tender_filename],
+          ["Tender Hash", result.tender_hash],
+          ["Tender Uploaded At", result.tender_uploaded_at],
+          ["Tender Text (chars)", result.tender_chars],
+          ["Tender Method", result.tender_method],
+          ["Bidder File", result.bidder_filename],
+          ["Bidder Hash", result.bidder_hash],
+          ["Bidder Uploaded At", result.bidder_uploaded_at],
+          ["Bidder Text (chars)", result.bidder_chars],
+          ["Bidder Method", result.bidder_method],
+          [
+            "Threshold",
+            `${result.threshold_value} ${result.threshold_unit || ""}`,
+          ],
+        ].map(
+          ([k, v]) =>
+            v !== undefined &&
+            v !== null && (
+              <div key={k} className="result-row">
+                <span className="result-key">{k}</span>
+                <span className="result-val">{String(v)}</span>
               </div>
-
-              {[
-                { label: "Document Hash", val: result.document_hash.substring(0, 32) + "..." },
-                { label: "Filename",      val: result.filename },
-                { label: "Vault Path",    val: result.vault_path },
-                { label: "File Size",     val: `${(result.file_size_bytes / 1024).toFixed(1)} KB` },
-                { label: "Virus Scan",    val: result.virus_scan.toUpperCase() },
-              ].map(r => (
-                <div key={r.label} style={{
-                  display: "flex", justifyContent: "space-between",
-                  padding: "6px 0", borderBottom: "1px solid var(--navy-border)",
-                }}>
-                  <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{r.label}</span>
-                  <span style={{ fontSize: 12, color: "var(--text-primary)", fontFamily: "'IBM Plex Mono',monospace",
-                    maxWidth: 260, textAlign: "right", wordBreak: "break-all" }}>{r.val}</span>
-                </div>
-              ))}
-
-              {/* Classification */}
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 11, color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace",
-                  marginBottom: 10, letterSpacing: "0.1em" }}>CLASSIFICATION</div>
-                {[
-                  { label: "Doc Type",   val: result.classification.doc_type.toUpperCase() },
-                  { label: "Status",     val: result.classification.classification_status },
-                  { label: "Confidence", val: tierLabel(result.classification.confidence_tier) },
-                  { label: "Tender ID",  val: result.classification.tender_id || "—" },
-                  { label: "Bidder ID",  val: result.classification.bidder_id || "—" },
-                ].map(r => (
-                  <div key={r.label} style={{
-                    display: "flex", justifyContent: "space-between",
-                    padding: "5px 0", borderBottom: "1px solid var(--navy-border)",
-                  }}>
-                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{r.label}</span>
-                    <span style={{ fontSize: 12, color: "var(--text-primary)", fontFamily: "'IBM Plex Mono',monospace",
-                      maxWidth: 260, textAlign: "right" }}>{r.val}</span>
-                  </div>
-                ))}
-                <div style={{ marginTop: 12, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6 }}>
-                  {result.classification.reason}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Duplicate result */}
-          {result && result.status === "DUPLICATE" && (
-            <div style={{
-              background: "var(--navy-card)", border: "1px solid var(--amber)",
-              borderRadius: 8, padding: "20px",
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                <div style={{ fontSize: 11, color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace", letterSpacing: "0.1em" }}>
-                  DUPLICATE DETECTED
-                </div>
-                <VerdictBadge value="DUPLICATE" />
-              </div>
-              <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                This document has already been ingested. Hash match found in the vault.
-              </p>
-              <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-muted)", fontFamily: "'IBM Plex Mono',monospace" }}>
-                Hash: {result.document_hash.substring(0, 32)}...
-              </div>
-            </div>
-          )}
-
-          {/* Empty state */}
-          {steps.length === 0 && !result && (
-            <div style={{
-              background: "var(--navy-card)", border: "1px solid var(--navy-border)",
-              borderRadius: 8, padding: "40px 24px", textAlign: "center",
-            }}>
-              <div style={{ fontSize: 32, marginBottom: 12 }}>🔒</div>
-              <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                Pipeline status will appear here after you submit a document.
-              </div>
-              <div style={{ marginTop: 16, fontSize: 11, color: "var(--text-muted)", fontFamily: "'IBM Plex Mono',monospace" }}>
-                Virus Scan → Hash → Dedup → Classify → Vault → Audit
-              </div>
-            </div>
-          )}
+            ),
+        )}
+        <div
+          style={{
+            marginTop: "0.75rem",
+            fontSize: "11px",
+            color: "var(--text-muted)",
+          }}
+        >
+          Poll:{" "}
+          <code style={{ color: "var(--blue)" }}>
+            GET /api/v1/evaluate/jobs/{result.job_id}
+          </code>
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div className={`result-box ${boxClass}`} style={{ marginTop: "1.5rem" }}>
+      <div className="result-title">
+        {isDupe ? "⚠ Duplicate Detected" : "✅ Document Ingested"}
+      </div>
+      {[
+        ["Status", result.status],
+        ["Hash", result.document_hash],
+        ["Filename", result.filename],
+        ["Vault Path", result.vault_path],
+        ["Doc Type", result.classification?.doc_type],
+        ["Virus Scan", result.virus_scan],
+        [
+          "File Size",
+          result.file_size_bytes
+            ? `${result.file_size_bytes} bytes`
+            : undefined,
+        ],
+        ["Layer 2", result.layer2_extraction],
+      ].map(
+        ([k, v]) =>
+          v !== undefined &&
+          v !== null && (
+            <div key={k} className="result-row">
+              <span className="result-key">{k}</span>
+              <span className="result-val">{String(v)}</span>
+            </div>
+          ),
+      )}
     </div>
   );
 }
