@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import NavbarWrapper from "@/components/Navbar";
+import Navbar from "@/components/Navbar";
 
 export const metadata: Metadata = {
   title: "CRPF Tender Evaluation Platform",
@@ -16,7 +16,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <NavbarWrapper />
+        <Navbar />
         <main style={{ minHeight: "calc(100vh - 56px)" }}>{children}</main>
       </body>
     </html>
