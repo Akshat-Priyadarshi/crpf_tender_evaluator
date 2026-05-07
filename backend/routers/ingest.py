@@ -21,7 +21,7 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from models.db import Document, get_db
@@ -30,6 +30,7 @@ from services.classifier import classify
 from services.hasher import check_and_hash
 from services.vault import write_to_vault
 from services.virus_scanner import ScanVerdict, scan_bytes
+from services.extractor import process_document_ai
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 
 @router.post("/ingest", status_code=201)
 async def ingest_document(
+    background_tasks: BackgroundTasks,
     file:       UploadFile = File(...),
     tender_id:  Optional[str] = Form(None),
     bidder_id:  Optional[str] = Form(None),
@@ -243,6 +245,9 @@ async def ingest_document(
     )
 
     db.commit()
+
+    # We pass the vault_path so docTR knows where to find the pdf
+    background_tasks.add_task(process_document_ai, db, vault_path, hash_result.document_hash)
 
     # ── Step 8: Return 201 ────────────────────────────────────────────────
     return {

@@ -1,5 +1,4 @@
 services:
-
   postgres:
     image: postgres:15-alpine
     container_name: crpf_postgres
@@ -14,7 +13,11 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crpf} -d ${POSTGRES_DB:-crpf_ingestion}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-crpf} -d ${POSTGRES_DB:-crpf_ingestion}",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -53,7 +56,16 @@ services:
     ports:
       - "8000:8000"
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: crpf_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
 volumes:
   pgdata:
   clamav_db:
   evidence_vault:
+  ollama_data:

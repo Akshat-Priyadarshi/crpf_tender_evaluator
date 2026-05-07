@@ -8,10 +8,11 @@ import os
 from datetime import datetime, timezone
 from sqlalchemy import (
     create_engine, Column, String, BigInteger, Text,
-    DateTime, JSON, UniqueConstraint, CheckConstraint, Index
+    DateTime, JSON, UniqueConstraint, CheckConstraint, Index, Integer, Float, Boolean, ForeignKey
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.sql import func
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://crpf:crpf_secret@localhost:5432/crpf_ingestion")
 
@@ -119,3 +120,28 @@ class VaultAccess(Base):
         UniqueConstraint("tender_id", "role", name="uq_vault_tender_role"),
         Index("idx_vault_access_tender", "tender_id"),
     )
+
+class ExtractedCriteria(Base):
+    __tablename__ = "extracted_criteria"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Links this data point to the specific file in the vault
+    document_hash = Column(String, index=True) 
+    
+    # The specific rule being checked (e.g., C-01 for Turnover)
+    criterion_id = Column(String) 
+    
+    # The actual result found by the AI
+    extracted_value = Column(String) 
+    
+    # JSON string containing [x, y, width, height] for the UI highlight
+    bbox_coordinates = Column(Text) 
+    
+    # Probability score from the OCR/LLM
+    confidence_score = Column(Float)
+    
+    # For Audit: The specific text snippet the AI looked at
+    context_snippet = Column(Text)
+    
+    # Human accountability: Did an officer change this value?
+    is_verified = Column(Boolean, default=False)
