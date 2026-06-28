@@ -174,7 +174,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 docker compose up -d --build
 ```
 
-**⚠️ CRITICAL — Wait for ClamAV on first boot:**
+** CRITICAL — Wait for ClamAV on first boot:**
 
 ClamAV downloads ~250MB of virus definitions on first startup. This takes 2–5 minutes. Do not proceed until it's ready.
 
